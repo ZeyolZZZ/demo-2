@@ -302,13 +302,19 @@ jobs:
           set -euxo pipefail
           cd kernel
           echo "=== 候选镜像 ==="
-          find -L . -type f \( -name 'Image.lz4' -o -name 'Image.gz' \) \
+          find -L . -type f \( -name 'Image.lz4' -o -name 'Image.gz' -o -name 'Image' \) \
             -not -path './prebuilts/*' -not -path './external/*' 2>/dev/null | head -20
 
-          IMG=$(find -L bazel-bin -type f -name 'Image.lz4' 2>/dev/null | head -1)
-          [ -n "$IMG" ] || IMG=$(find -L out -type f -name 'Image.lz4' 2>/dev/null | head -1)
-          [ -n "$IMG" ] || IMG=$(find -L bazel-bin -type f -name 'Image.gz' 2>/dev/null | head -1)
-          [ -n "$IMG" ] || IMG=$(find -L out -type f -name 'Image.gz' 2>/dev/null | head -1)
+          # 纯 make 的输出在 common/out/arch/arm64/boot/
+          # kleaf 的输出在 bazel-bin/common/kernel_aarch64/dist/
+          IMG=""
+          for base in bazel-bin common/out out; do
+            for name in Image.lz4 Image.gz Image; do
+              [ -n "$IMG" ] && break
+              IMG=$(find -L "$base" -type f -name "$name" 2>/dev/null | head -1)
+            done
+            [ -n "$IMG" ] && break
+          done
           [ -n "$IMG" ] || { echo "::error::没找到编译出的内核镜像"; exit 1; }
           echo "IMG=$IMG"
           ls -l "$IMG"
