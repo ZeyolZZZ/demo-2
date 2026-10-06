@@ -146,22 +146,46 @@ jobs:
           grep -q 'drivers/kernelsu/Kconfig' common/drivers/Kconfig \
             || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig
 
-          # ---- 修补上游缺陷: builtin 分支漏提交了 kernel/arch.h ----
-          # builtin tip 的 kernel_includes.h 有 #include "arch.h", 但该分支里
-          # kernel/arch.h 与 kernel/include/arch.h 都不存在 (raw 拉取 404),
-          # 会导致 ksu.o 编译失败。main 分支的 kernel/include/arch.h 是纯宏定义、
-          # 自包含(只 include <linux/version.h>), 直接搬过来即可。
+          # ---- 修补上游缺陷 (builtin 分支是"部分同步"的, 已在本机逐项验证) ----
+          # 实测: 补完这 3 处后 drivers/kernelsu/ 编译 rc=0,
+          # 且与 SUSFS v2.3.0 核心补丁的符号需求求差集为 0 (不会链接失败)。
+
+          # (1) builtin 漏提交 kernel/arch.h, 而 kernel_includes.h:76 有
+          #     #include "arch.h" -> ksu.o 编译失败。
+          #     main 的 kernel/include/arch.h 是纯宏、自包含, 直接搬。
           ARCH_H=$(find KernelSU/kernel -name 'arch.h' 2>/dev/null | head -1)
           if [ -z "$ARCH_H" ]; then
-            echo "::warning::KernelSU 缺少 arch.h, 从 main 分支补齐"
             curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/include/arch.h" \
               -o KernelSU/kernel/arch.h
             cp KernelSU/kernel/arch.h KernelSU/kernel/include/arch.h
             grep -q '__PT_PARM1_REG' KernelSU/kernel/arch.h \
               || { echo "::error::arch.h 内容不正确"; exit 1; }
-            echo "✅ 已补入 arch.h ($(wc -l < KernelSU/kernel/arch.h) 行)"
+            echo "✅ [1/3] 已补入 arch.h"
           else
-            echo "arch.h 已存在: $ARCH_H"
+            echo "[1/3] arch.h 已存在"
+          fi
+
+          # (2) kernel/include/uapi/supercall.h 漏了 EVENT_SERVICES,
+          #     但 supercall/dispatch.c:98 在用 -> 未声明标识符。
+          #     注意: 仓库根的 uapi/ 是给 userspace 的, kernel 用 include/uapi/。
+          if ! grep -q 'EVENT_SERVICES' KernelSU/kernel/include/uapi/supercall.h; then
+            sed -i 's/^DECLARE(__u32, EVENT_MODULE_MOUNTED, 3);$/DECLARE(__u32, EVENT_MODULE_MOUNTED, 3);\nDECLARE(__u32, EVENT_SERVICES, 4);/' \
+              KernelSU/kernel/include/uapi/supercall.h
+            grep -q 'EVENT_SERVICES, 4' KernelSU/kernel/include/uapi/supercall.h \
+              || { echo "::error::EVENT_SERVICES 写入失败"; exit 1; }
+            echo "✅ [2/3] 已补 EVENT_SERVICES"
+          else
+            echo "[2/3] EVENT_SERVICES 已存在"
+          fi
+
+          # (3) selinux/rules.c 的 >=5.10 分支内重复声明 pol/old_pol, 与外层冲突。
+          #     下一行立即赋值, 故删掉内层的类型声明即可。
+          if grep -q '^    struct selinux_policy \*pol, \*old_pol = selinux_state.policy;$' KernelSU/kernel/selinux/rules.c; then
+            sed -i '/^    struct selinux_policy \*pol, \*old_pol = selinux_state.policy;$/d' \
+              KernelSU/kernel/selinux/rules.c
+            echo "✅ [3/3] 已删除重复声明"
+          else
+            echo "[3/3] rules.c 无重复声明"
           fi
           echo "✅ SukiSU-Ultra 已接入 common/drivers/kernelsu"
 
