@@ -19,7 +19,7 @@ on:
       ksu_ref:
         description: 'SukiSU-Ultra builtin 分支的 tag/commit/branch (对应管理器 v4.2.0)'
         required: true
-        default: 'b20dee7020'
+        default: '70fa0e092a'
       susfs_branch:
         description: 'susfs4ksu 分支'
         required: true
@@ -27,7 +27,7 @@ on:
       susfs_commit:
         description: 'susfs4ksu commit (留空 = 分支最新)'
         required: false
-        default: '3f0b811'
+        default: 'a0f9c59'
       lto:
         description: 'LTO 模式 (thin / none)'
         required: true
@@ -145,6 +145,24 @@ jobs:
             || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> common/drivers/Makefile
           grep -q 'drivers/kernelsu/Kconfig' common/drivers/Kconfig \
             || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig
+
+          # ---- 修补上游缺陷: builtin 分支漏提交了 kernel/arch.h ----
+          # builtin tip 的 kernel_includes.h 有 #include "arch.h", 但该分支里
+          # kernel/arch.h 与 kernel/include/arch.h 都不存在 (raw 拉取 404),
+          # 会导致 ksu.o 编译失败。main 分支的 kernel/include/arch.h 是纯宏定义、
+          # 自包含(只 include <linux/version.h>), 直接搬过来即可。
+          ARCH_H=$(find KernelSU/kernel -name 'arch.h' 2>/dev/null | head -1)
+          if [ -z "$ARCH_H" ]; then
+            echo "::warning::KernelSU 缺少 arch.h, 从 main 分支补齐"
+            curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/include/arch.h" \
+              -o KernelSU/kernel/arch.h
+            cp KernelSU/kernel/arch.h KernelSU/kernel/include/arch.h
+            grep -q '__PT_PARM1_REG' KernelSU/kernel/arch.h \
+              || { echo "::error::arch.h 内容不正确"; exit 1; }
+            echo "✅ 已补入 arch.h ($(wc -l < KernelSU/kernel/arch.h) 行)"
+          else
+            echo "arch.h 已存在: $ARCH_H"
+          fi
           echo "✅ SukiSU-Ultra 已接入 common/drivers/kernelsu"
 
       # ------------------------------------------------------------- 集成 SUSFS
