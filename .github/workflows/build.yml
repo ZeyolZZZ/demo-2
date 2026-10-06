@@ -28,6 +28,10 @@ on:
         description: 'susfs4ksu commit (留空 = 分支最新)'
         required: false
         default: 'a0f9c59'
+      ksu_version:
+        description: '覆盖内核上报的 KSU 版本号 (留空=按源码 git commit 数计算)。设成与设备上的 SukiSU 管理器 versionCode 相同即可消除"版本不匹配"'
+        required: false
+        default: '40900'
       lto:
         description: 'LTO 模式 (thin / none)'
         required: true
@@ -186,6 +190,22 @@ jobs:
             echo "✅ [3/3] 已删除重复声明"
           else
             echo "[3/3] rules.c 无重复声明"
+          fi
+          # (4) 覆盖上报的 KSU 版本号
+          #     源码里 KSU_VERSION = VERSION_BASE(40000) + LOCAL_COUNT - VERSION_OFFSET(2815),
+          #     即"按 commit 数线性增长"。本分支 tip 的 LOCAL_COUNT 比 v4.2.0 tag 多 59,
+          #     所以上报 40959; 若设备上的管理器是 40900 就会提示版本不匹配。
+          KSU_VER="${{ inputs.ksu_version }}"
+          if [ -n "$KSU_VER" ]; then
+            BEFORE=$(grep -m1 -E '^KSU_VERSION[[:space:]]*:=' KernelSU/kernel/Makefile || true)
+            sed -i -E "s|^KSU_VERSION[[:space:]]*:=.*|KSU_VERSION     := ${KSU_VER}|" KernelSU/kernel/Makefile
+            AFTER=$(grep -m1 -E '^KSU_VERSION[[:space:]]*:=' KernelSU/kernel/Makefile || true)
+            echo "KSU_VERSION: [${BEFORE}] -> [${AFTER}]"
+            echo "$AFTER" | grep -q ":= ${KSU_VER}$" \
+              || { echo "::error::KSU 版本号覆盖失败"; exit 1; }
+            echo "✅ [4/4] KSU 版本号已覆盖为 ${KSU_VER}"
+          else
+            echo "[4/4] 不覆盖 KSU 版本号"
           fi
           echo "✅ SukiSU-Ultra 已接入 common/drivers/kernelsu"
 
