@@ -19,7 +19,7 @@ on:
       ksu_ref:
         description: 'SukiSU-Ultra builtin 分支的 tag/commit/branch (对应管理器 v4.2.0)'
         required: true
-        default: 'b20dee7020'
+        default: '70fa0e092a'
       susfs_branch:
         description: 'susfs4ksu 分支'
         required: true
@@ -219,31 +219,37 @@ jobs:
           echo "--- build.config.gki ---"; cat common/build.config.gki
 
       # --------------------------------------------------------------- 编译
-      - name: 编译内核 (kleaf/Bazel, 失败自动回退纯 make)
+      - name: 编译内核 (纯 make 主路径, 失败回退 kleaf)
         run: |
           set -euxo pipefail
           cd kernel
           export LTO="${{ inputs.lto }}"
 
+          # ---- 主路径: 纯 make ----
+          # 用 manifest 自带的 AOSP clang-r510928 (与出厂内核编译工具完全一致)
+          # 关闭 TRIM_UNUSED_KSYMS: 保留全部导出符号 = KMI 的超集, 符号 CRC 不变,
+          # 因此原厂 vendor_dlkm 模块照常加载 (也省去 abi_symbollist.raw 依赖)
           set +e
-          tools/bazel build --config=fast --verbose_failures --lto="$LTO" \
-            //common:kernel_aarch64_dist
-          rc=$?
-          set -e
-          if [ $rc -eq 0 ]; then
-            echo "✅ kleaf 构建成功"
-            find -L bazel-bin -type f -name 'Image.lz4' 2>/dev/null | head
-          else
-            echo "::warning::kleaf 构建失败 (rc=$rc), 回退到纯 make 构建"
+          (
             cd common
             export PATH="$PWD/../prebuilts/clang/host/linux-x86/clang-r510928/bin:$PWD/../prebuilts/build-tools/linux-x86/bin:$PWD/../prebuilts/kernel-build-tools/linux-x86/bin:$PATH"
             clang --version | head -2
             make O=out ARCH=arm64 LLVM=1 gki_defconfig
-            # 关闭 TRIM_UNUSED_KSYMS: 保留全部导出符号(KMI 的超集), 保证 vendor 模块能加载
             ./scripts/config --file out/.config -d TRIM_UNUSED_KSYMS -d UNUSED_KSYMS_WHITELIST
             make O=out ARCH=arm64 LLVM=1 olddefconfig
-            grep -E 'CONFIG_KSU=|CONFIG_KSU_SUSFS=|CONFIG_TRIM_UNUSED_KSYMS' out/.config || true
+            echo "--- 关键配置核对 ---"
+            grep -E 'CONFIG_KSU=|CONFIG_KSU_SUSFS=|CONFIG_KSU_SUSFS_SUS_MOUNT=|CONFIG_TRIM_UNUSED_KSYMS|CONFIG_LTO_NONE|CONFIG_ARM64_4K_PAGES' out/.config || true
             make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 Image.lz4
+          )
+          rc=$?
+          set -e
+
+          if [ $rc -eq 0 ]; then
+            echo "✅ 纯 make 构建成功"
+          else
+            echo "::warning::纯 make 构建失败 (rc=$rc), 回退到 kleaf/Bazel"
+            tools/bazel build --config=fast --verbose_failures --lto="$LTO" \
+              //common:kernel_aarch64_dist
           fi
           df -h /
 
