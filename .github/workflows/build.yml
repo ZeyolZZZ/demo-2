@@ -279,6 +279,35 @@ jobs:
           sed -i '/MODULES_ORDER=/d; /KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64
           echo "--- build.config.gki ---"; cat common/build.config.gki
 
+      # -------------------------------------------------------------- 干净工作树
+      # 内核的 scripts/setlocalversion 会在工作树相对 HEAD 有未提交改动时追加
+      # "-dirty"。这里把补丁真正提交掉，让树本身变干净，从而【从根本上】不存在
+      # -dirty，而不是在版本串上做手脚。
+      - name: 提交本地补丁 (消除 -dirty)
+        run: |
+          set -euxo pipefail
+          cd kernel/common
+          git config user.email "kernel-build@local"
+          git config user.name "kernel-build"
+          git add -A
+          if git diff-index --quiet --cached HEAD --; then
+            echo "工作树本来就干净，无需提交"
+          else
+            git commit -q -m "RMX5080: built-in SukiSU-Ultra + SUSFS v2.3.0
+
+AOSP GKI android15-6.6-2026-01 (6.6.118) with:
+  - SukiSU-Ultra builtin driver (SUSFS glue from the builtin branch)
+  - SUSFS v2.3.0
+  - gki_defconfig additions for KSU + SUSFS
+
+The patch set is committed so the work tree is genuinely clean and
+scripts/setlocalversion does not append -dirty to the release string."
+            echo "已提交: $(git rev-parse --short HEAD)"
+          fi
+          echo "--- 剩余未提交改动: $(git diff-index --name-only HEAD | wc -l) 个 ---"
+          echo "--- 工作树状态 ---"
+          git status --porcelain | head -20
+
       # --------------------------------------------------------------- 编译
       - name: 编译内核 (纯 make 主路径, 失败回退 kleaf)
         run: |
