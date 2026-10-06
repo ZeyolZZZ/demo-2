@@ -238,6 +238,8 @@ jobs:
         run: |
           set -euxo pipefail
           cat >> kernel/common/arch/arm64/configs/gki_defconfig <<'EOF'
+          # 版本串与出厂内核逐字节一致（对齐 realme UI 7.0 官方 boot 里解出的字符串）
+          CONFIG_LOCALVERSION="-android15-8-ge58033dc8ea6-abogki498046332-4k"
 
           # ==== KernelSU (built-in) ====
           CONFIG_KSU=y
@@ -269,6 +271,16 @@ jobs:
           CONFIG_IP6_NF_MATCH_HL=y
           EOF
           echo "✅ 已追加 KSU/SUSFS 配置"
+
+      - name: 固定版本串 (抑制 setlocalversion 的 scm 后缀)
+        run: |
+          set -euxo pipefail
+          F=kernel/common/scripts/setlocalversion
+          cp -f "$F" "$F.orig"
+          # 顶部直接退出：不输出 -g<sha>，也不输出未打 tag 时的 "+"
+          { echo '#!/bin/sh'; echo '# RMX5080: suppress scm version so UTS_RELEASE == CONFIG_LOCALVERSION'; echo 'printf "%s" ""'; echo 'exit 0'; echo; tail -n +2 "$F.orig"; } > "$F"
+          chmod +x "$F"
+          head -6 "$F"
 
       - name: 调整 AOSP 构建配置
         run: |
@@ -321,6 +333,11 @@ jobs:
             make O=out ARCH=arm64 LLVM=1 olddefconfig
             echo "--- 关键配置核对 ---"
             grep -E 'CONFIG_KSU=|CONFIG_KSU_SUSFS=|CONFIG_KSU_SUSFS_SUS_MOUNT=|CONFIG_TRIM_UNUSED_KSYMS|CONFIG_LTO_NONE|CONFIG_ARM64_4K_PAGES' out/.config || true
+            # 与出厂内核的 "kleaf@build-host" "#1 <时间>" 对齐
+            export KBUILD_BUILD_USER=kleaf
+            export KBUILD_BUILD_HOST=build-host
+            export KBUILD_BUILD_VERSION=1
+            export KBUILD_BUILD_TIMESTAMP="Sun Mar 29 12:31:26 UTC 2026"
             make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 Image.lz4
           )
           rc=$?
