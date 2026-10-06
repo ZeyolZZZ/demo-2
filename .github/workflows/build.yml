@@ -293,15 +293,7 @@ jobs:
           if git diff-index --quiet --cached HEAD --; then
             echo "工作树本来就干净，无需提交"
           else
-            git commit -q -m "RMX5080: built-in SukiSU-Ultra + SUSFS v2.3.0
-
-AOSP GKI android15-6.6-2026-01 (6.6.118) with:
-  - SukiSU-Ultra builtin driver (SUSFS glue from the builtin branch)
-  - SUSFS v2.3.0
-  - gki_defconfig additions for KSU + SUSFS
-
-The patch set is committed so the work tree is genuinely clean and
-scripts/setlocalversion does not append -dirty to the release string."
+            git commit -q -m "RMX5080: built-in SukiSU-Ultra + SUSFS v2.3.0 (AOSP GKI android15-6.6-2026-01 / 6.6.118); committed so scripts/setlocalversion sees a clean tree"
             echo "已提交: $(git rev-parse --short HEAD)"
           fi
           echo "--- 剩余未提交改动: $(git diff-index --name-only HEAD | wc -l) 个 ---"
