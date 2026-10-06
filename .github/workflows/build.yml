@@ -3,7 +3,11 @@ name: Build RMX5080 GKI 6.6.118 (SukiSU-Ultra built-in + SUSFS)
 # 目标设备: realme Neo7 SE RMX5080 / MT6899 (Dimensity 8400-Max)
 #   GKI KMI: android15-6.6 (KMI_GENERATION=8), 4K 页, aarch64
 #   出厂内核: 6.6.118-android15-8-ge58033dc8ea6-abogki498046332-4k
-# 说明: 本 workflow 产出 AnyKernel3 刷机包(内置 KSU + SUSFS), 不含 LKM 模式。
+# 说明: 产出 AnyKernel3 刷机包(内核内置 KSU + SUSFS), 不含 LKM 模式。
+#
+# 2026 年起 AOSP kernel/manifest 已移除旧版 build/build.sh, 构建入口为 kleaf:
+#   tools/bazel build --config=fast --lto=<thin|none> //common:kernel_aarch64_dist
+# 若 kleaf 失败, 自动回退到纯 make 构建 (关闭 TRIM_UNUSED_KSYMS 以保留全部导出符号)。
 
 on:
   workflow_dispatch:
@@ -28,10 +32,6 @@ on:
         description: 'LTO 模式 (thin / none)'
         required: true
         default: 'thin'
-      kernel_suffix:
-        description: '版本号后缀 (会出现在 uname -r)'
-        required: false
-        default: 'RMX5080'
       create_release:
         description: '创建 GitHub Release'
         required: true
@@ -44,7 +44,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 300
 
     steps:
       # ---------------------------------------------------------------- 环境
@@ -71,15 +71,14 @@ jobs:
             python3 python-is-python3 \
             zip unzip lz4 zstd cpio rsync ccache kmod dwarves \
             device-tree-compiler git curl ca-certificates
+          df -h /
 
       - name: 配置 ccache
         run: |
           set -euxo pipefail
-          ccache --version
           ccache --max-size=3G
           ccache --set-config=compression=true
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
-          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
 
       - name: 恢复 ccache 缓存
         uses: actions/cache@v4
@@ -107,6 +106,9 @@ jobs:
             -b "${{ inputs.gki_branch }}" --repo-rev=v2.16
           repo sync -c -j"$(nproc)" --no-tags --fail-fast
           test -d common || { echo "::error::repo sync 后没有 common/ 目录"; exit 1; }
+          echo "--- 顶层目录 ---"; ls -1
+          echo "--- 构建入口 ---"; ls -l tools/bazel 2>/dev/null || echo "(tools/bazel 不存在)"
+          df -h /
 
       - name: 校验内核版本与 KMI
         run: |
@@ -118,7 +120,7 @@ jobs:
           KMI=$(sed -n 's/^KMI_GENERATION=//p' common/build.config.common)
           LV=$(sed -n 's/^CONFIG_LOCALVERSION="\(.*\)"/\1/p' common/arch/arm64/configs/gki_defconfig)
           echo "内核版本 = $MAJ.$PAT.$SUB"
-          echo "KMI 代号 = android15-6.6 (KMI_GENERATION=$KMI)"
+          echo "KMI = android15-6.6 (KMI_GENERATION=$KMI)"
           echo "LOCALVERSION = $LV"
           echo "CLANG = $(sed -n 's/^CLANG_VERSION=//p' common/build.config.constants)"
           [ "$MAJ.$PAT.$SUB" = "6.6.118" ] || { echo "::error::期望 6.6.118, 实际 $MAJ.$PAT.$SUB"; exit 1; }
@@ -135,7 +137,6 @@ jobs:
           cd KernelSU
           git checkout "${{ inputs.ksu_ref }}"
           echo "SukiSU commit: $(git rev-parse HEAD)"
-          echo "SukiSU version: $(git describe --tags --always)"
           grep -q 'config KSU_SUSFS' kernel/Kconfig \
             || { echo "::error::该 SukiSU 分支不含 SUSFS 支持, 请使用 builtin 分支"; exit 1; }
           cd ..
@@ -155,23 +156,19 @@ jobs:
             cd susfs4ksu && git checkout "${{ inputs.susfs_commit }}" && cd ..
           fi
           echo "SUSFS commit: $(git -C susfs4ksu rev-parse HEAD)"
-          echo "SUSFS version: $(grep -m1 SUSFS_VERSION susfs4ksu/kernel_patches/include/linux/susfs.h)"
+          grep -m1 SUSFS_VERSION susfs4ksu/kernel_patches/include/linux/susfs.h || true
 
           PATCH=susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
           test -f "$PATCH" || { echo "::error::找不到 SUSFS 补丁 $PATCH"; exit 1; }
 
-          # 1) 投放 SUSFS 核心实现文件
-          cp susfs4ksu/kernel_patches/fs/susfs.c            kernel/common/fs/
-          cp susfs4ksu/kernel_patches/include/linux/susfs.h kernel/common/include/linux/
-          cp susfs4ksu/kernel_patches/include/linux/susfs_def.h kernel/common/include/linux/
+          cp susfs4ksu/kernel_patches/fs/susfs.c                 kernel/common/fs/
+          cp susfs4ksu/kernel_patches/include/linux/susfs.h      kernel/common/include/linux/
+          cp susfs4ksu/kernel_patches/include/linux/susfs_def.h  kernel/common/include/linux/
           cp "$PATCH" kernel/common/
 
-          # 2) 打补丁到核心内核
           cd kernel/common
           patch -p1 --fuzz=3 --no-backup-if-mismatch < "$(basename "$PATCH")"
           test -f fs/susfs.c || { echo "::error::fs/susfs.c 缺失"; exit 1; }
-          grep -q 'CONFIG_KSU_SUSFS' include/linux/susfs.h \
-            || echo "::warning::susfs.h 里没有 CONFIG_KSU_SUSFS, 请留意"
           echo "✅ SUSFS 核心补丁已应用"
 
       # --------------------------------------------------------------- 配置
@@ -216,44 +213,59 @@ jobs:
         run: |
           set -euxo pipefail
           cd kernel
-          # check_defconfig 会因为上面的追加配置报错, 去掉
           sed -i 's/check_defconfig//' common/build.config.gki
-          # 不构建 GKI 的 system_dlkm (vendor 模块保持原厂)
           sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64
           sed -i '/MODULES_ORDER=/d; /KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64
           echo "--- build.config.gki ---"; cat common/build.config.gki
-          echo "--- build.config.gki.aarch64 ---"; cat common/build.config.gki.aarch64
 
       # --------------------------------------------------------------- 编译
-      - name: 编译内核
+      - name: 编译内核 (kleaf/Bazel, 失败自动回退纯 make)
         run: |
           set -euxo pipefail
           cd kernel
           export LTO="${{ inputs.lto }}"
-          export BUILD_CONFIG=common/build.config.gki.aarch64
-          export CC="/usr/bin/ccache clang"
-          echo "LTO=$LTO  BUILD_CONFIG=$BUILD_CONFIG"
-          build/build.sh
-          ccache --show-stats || true
+
+          set +e
+          tools/bazel build --config=fast --verbose_failures --lto="$LTO" \
+            //common:kernel_aarch64_dist
+          rc=$?
+          set -e
+          if [ $rc -eq 0 ]; then
+            echo "✅ kleaf 构建成功"
+            find -L bazel-bin -type f -name 'Image.lz4' 2>/dev/null | head
+          else
+            echo "::warning::kleaf 构建失败 (rc=$rc), 回退到纯 make 构建"
+            cd common
+            export PATH="$PWD/../prebuilts/clang/host/linux-x86/clang-r510928/bin:$PWD/../prebuilts/build-tools/linux-x86/bin:$PWD/../prebuilts/kernel-build-tools/linux-x86/bin:$PATH"
+            clang --version | head -2
+            make O=out ARCH=arm64 LLVM=1 gki_defconfig
+            # 关闭 TRIM_UNUSED_KSYMS: 保留全部导出符号(KMI 的超集), 保证 vendor 模块能加载
+            ./scripts/config --file out/.config -d TRIM_UNUSED_KSYMS -d UNUSED_KSYMS_WHITELIST
+            make O=out ARCH=arm64 LLVM=1 olddefconfig
+            grep -E 'CONFIG_KSU=|CONFIG_KSU_SUSFS=|CONFIG_TRIM_UNUSED_KSYMS' out/.config || true
+            make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 Image.lz4
+          fi
+          df -h /
 
       - name: 收集编译产物
         run: |
           set -euxo pipefail
-          echo "=== out 目录结构 ==="
-          find kernel/out -maxdepth 3 -type d | head -20
-          echo "=== 候选内核镜像 ==="
-          find kernel/out -type f \( -name 'Image' -o -name 'Image.gz' -o -name 'Image.lz4' \) -exec ls -l {} \;
+          cd kernel
+          echo "=== 候选镜像 ==="
+          find -L . -type f \( -name 'Image.lz4' -o -name 'Image.gz' \) \
+            -not -path './prebuilts/*' -not -path './external/*' 2>/dev/null | head -20
 
-          IMG=$(find kernel/out -type f -name 'Image.lz4' | head -1)
-          [ -n "$IMG" ] || IMG=$(find kernel/out -type f -name 'Image.gz' | head -1)
-          [ -n "$IMG" ] || IMG=$(find kernel/out -type f -name 'Image' | head -1)
+          IMG=$(find -L bazel-bin -type f -name 'Image.lz4' 2>/dev/null | head -1)
+          [ -n "$IMG" ] || IMG=$(find -L out -type f -name 'Image.lz4' 2>/dev/null | head -1)
+          [ -n "$IMG" ] || IMG=$(find -L bazel-bin -type f -name 'Image.gz' 2>/dev/null | head -1)
+          [ -n "$IMG" ] || IMG=$(find -L out -type f -name 'Image.gz' 2>/dev/null | head -1)
           [ -n "$IMG" ] || { echo "::error::没找到编译出的内核镜像"; exit 1; }
-          cp "$IMG" kernel/Image.lz4
           echo "IMG=$IMG"
-          ls -l kernel/Image.lz4
+          ls -l "$IMG"
+          cp "$IMG" "$GITHUB_WORKSPACE/Image.lz4"
+          ls -l "$GITHUB_WORKSPACE/Image.lz4"
           echo "=== 产物内嵌版本串 ==="
-          strings kernel/Image.lz4 2>/dev/null | grep -m1 -E '^6\.6\.[0-9]+' || true
-          echo "IMAGE_PATH=$IMG" >> "$GITHUB_ENV"
+          strings "$GITHUB_WORKSPACE/Image.lz4" 2>/dev/null | grep -m2 -E '^6\.6\.[0-9]+' || true
 
       # ------------------------------------------------------------ AnyKernel3
       - name: 打包 AnyKernel3
@@ -261,13 +273,12 @@ jobs:
           set -euxo pipefail
           git clone --depth=1 -b gki-2.0 https://github.com/WildPlusKernel/AnyKernel3.git AnyKernel3
           rm -rf AnyKernel3/.git
-          # 使用我们自己的 anykernel.sh
           cp ak3/anykernel.sh AnyKernel3/anykernel.sh
           chmod +x AnyKernel3/anykernel.sh
-          cp kernel/Image.lz4 AnyKernel3/
+          cp Image.lz4 AnyKernel3/
 
           ZIP="RMX5080-GKI-6.6.118-SukiSU-SUSFS-AnyKernel3.zip"
-          ( cd AnyKernel3 && zip -r9 "../$ZIP" . -x '*.git*' )
+          ( cd AnyKernel3 && zip -r9 "$GITHUB_WORKSPACE/$ZIP" . -x '*.git*' )
           ls -l "$ZIP"
           sha256sum "$ZIP" | tee SHA256SUMS.txt
           echo "ZIP_NAME=$ZIP" >> "$GITHUB_ENV"
@@ -291,10 +302,10 @@ jobs:
             目标设备: realme Neo7 SE (RMX5080 / MT6899)
             内核: Linux **6.6.118**-android15-6.6 (KMI_GENERATION=8, 4K 页)
             Root: SukiSU-Ultra `${{ inputs.ksu_ref }}` (built-in, 不依赖 LKM)
-            SUSFS: `${{ inputs.susfs_branch }}` @ 核心补丁 v2.3.0
+            SUSFS: `${{ inputs.susfs_branch }}` 核心补丁 v2.3.0
             LTO: `${{ inputs.lto }}`
 
-            刷入方式: 用 Kernel Flasher / HorizonKernelFlasher 选择本 zip 刷入 (会写入 boot 分区)。
+            刷入方式: 用 Kernel Flasher / HorizonKernelFlasher 选择本 zip 刷入 (写入 boot 分区)。
           files: |
             ${{ env.ZIP_NAME }}
             SHA256SUMS.txt
