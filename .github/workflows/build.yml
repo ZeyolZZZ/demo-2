@@ -239,7 +239,6 @@ jobs:
           set -euxo pipefail
           cat >> kernel/common/arch/arm64/configs/gki_defconfig <<'EOF'
           # 版本串与出厂内核逐字节一致（对齐 realme UI 7.0 官方 boot 里解出的字符串）
-          CONFIG_LOCALVERSION="-android15-8-ge58033dc8ea6-abogki498046332-4k"
 
           # ==== KernelSU (built-in) ====
           CONFIG_KSU=y
@@ -272,15 +271,17 @@ jobs:
           EOF
           echo "✅ 已追加 KSU/SUSFS 配置"
 
-      - name: 固定版本串 (抑制 setlocalversion 的 scm 后缀)
+      - name: 固定版本串 (setlocalversion 是 KERNELRELEASE 的唯一生产者)
         run: |
           set -euxo pipefail
           F=kernel/common/scripts/setlocalversion
           cp -f "$F" "$F.orig"
-          # 顶部直接退出：不输出 -g<sha>，也不输出未打 tag 时的 "+"
-          { echo '#!/bin/sh'; echo '# RMX5080: suppress scm version so UTS_RELEASE == CONFIG_LOCALVERSION'; echo 'printf "%s" ""'; echo 'exit 0'; echo; tail -n +2 "$F.orig"; } > "$F"
-          chmod +x "$F"
-          head -6 "$F"
+          echo "--- 改动前最后一行 ---"; tail -1 "$F"
+          # 该脚本输出 = KERNELRELEASE = /proc/version 里的版本段。
+          # 直接把它固定成这台设备原厂内核的字符串（来源: boot_b 分区实读）。
+          sed -i 's|^echo "\${KERNELVERSION}.*$|echo "6.6.118-android15-8-ge58033dc8ea6-abogki498046332-4k"|' "$F"
+          echo "--- 改动后最后一行 ---"; tail -1 "$F"
+          grep -q 'android15-8' "$F" || { echo "::error::版本串替换失败"; exit 1; }
 
       - name: 调整 AOSP 构建配置
         run: |
