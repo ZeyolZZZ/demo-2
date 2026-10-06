@@ -253,11 +253,10 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_MAP=y
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_SUS_PATH=n
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+          # SUS_PATH 必须打开, 否则 ksu_susfs add_sus_path 无效(sus_path.txt 不会生效)
+          # 注意: 该 KSU 版本没有 TRY_UMOUNT / AUTO_ADD_* / SUS_SU 这些选项,
+          #       写了也会被 olddefconfig 丢弃, 故不再写入。
+          CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
           CONFIG_KSU_SUSFS_ENABLE_LOG=y
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
