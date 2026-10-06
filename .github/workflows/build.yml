@@ -301,27 +301,38 @@ jobs:
         run: |
           set -euxo pipefail
           cd kernel
-          echo "=== 候选镜像 ==="
-          find -L . -type f \( -name 'Image.lz4' -o -name 'Image.gz' -o -name 'Image' \) \
-            -not -path './prebuilts/*' -not -path './external/*' 2>/dev/null | head -20
 
           # 纯 make 的输出在 common/out/arch/arm64/boot/
           # kleaf 的输出在 bazel-bin/common/kernel_aarch64/dist/
+          # 注意: 内核构建会在 common/out 下生成自引用软链 source -> common,
+          #       所以绝不能用 `find -L .`(会报 filesystem loop 并以 1 退出,
+          #       配合 pipefail+set -e 会直接杀掉脚本)。优先用显式路径。
           IMG=""
-          for base in bazel-bin common/out out; do
-            for name in Image.lz4 Image.gz Image; do
-              [ -n "$IMG" ] && break
-              IMG=$(find -L "$base" -type f -name "$name" 2>/dev/null | head -1)
-            done
-            [ -n "$IMG" ] && break
+          for p in \
+            common/out/arch/arm64/boot/Image.lz4 \
+            bazel-bin/common/kernel_aarch64/dist/Image.lz4 \
+            common/out/arch/arm64/boot/Image.gz \
+            bazel-bin/common/kernel_aarch64/dist/Image.gz \
+            common/out/arch/arm64/boot/Image \
+            bazel-bin/common/kernel_aarch64/dist/Image ; do
+            if [ -f "$p" ]; then IMG="$p"; break; fi
           done
+
+          # 兜底: 受保护的 find (不使用 -L, 且不允许失败传播)
+          if [ -z "$IMG" ]; then
+            IMG=$(find common/out bazel-bin -maxdepth 8 -type f \
+                    \( -name 'Image.lz4' -o -name 'Image.gz' -o -name 'Image' \) \
+                    -print -quit 2>/dev/null || true)
+          fi
+
           [ -n "$IMG" ] || { echo "::error::没找到编译出的内核镜像"; exit 1; }
           echo "IMG=$IMG"
           ls -l "$IMG"
+          file "$IMG" || true
           cp "$IMG" "$GITHUB_WORKSPACE/Image.lz4"
           ls -l "$GITHUB_WORKSPACE/Image.lz4"
           echo "=== 产物内嵌版本串 ==="
-          strings "$GITHUB_WORKSPACE/Image.lz4" 2>/dev/null | grep -m2 -E '^6\.6\.[0-9]+' || true
+          strings "$GITHUB_WORKSPACE/Image.lz4" 2>/dev/null | grep -m3 -E '^6\.6\.[0-9]+' || true
 
       # ------------------------------------------------------------ AnyKernel3
       - name: 打包 AnyKernel3
