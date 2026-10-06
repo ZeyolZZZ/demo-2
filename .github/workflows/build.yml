@@ -1,0 +1,300 @@
+name: Build RMX5080 GKI 6.6.118 (SukiSU-Ultra built-in + SUSFS)
+
+# 目标设备: realme Neo7 SE RMX5080 / MT6899 (Dimensity 8400-Max)
+#   GKI KMI: android15-6.6 (KMI_GENERATION=8), 4K 页, aarch64
+#   出厂内核: 6.6.118-android15-8-ge58033dc8ea6-abogki498046332-4k
+# 说明: 本 workflow 产出 AnyKernel3 刷机包(内置 KSU + SUSFS), 不含 LKM 模式。
+
+on:
+  workflow_dispatch:
+    inputs:
+      gki_branch:
+        description: 'AOSP kernel manifest 分支 (6.6.118 = common-android15-6.6-2026-01)'
+        required: true
+        default: 'common-android15-6.6-2026-01'
+      ksu_ref:
+        description: 'SukiSU-Ultra builtin 分支的 tag/commit/branch (对应管理器 v4.2.0)'
+        required: true
+        default: 'b20dee7020'
+      susfs_branch:
+        description: 'susfs4ksu 分支'
+        required: true
+        default: 'gki-android15-6.6'
+      susfs_commit:
+        description: 'susfs4ksu commit (留空 = 分支最新)'
+        required: false
+        default: ''
+      lto:
+        description: 'LTO 模式 (thin / none)'
+        required: true
+        default: 'thin'
+      kernel_suffix:
+        description: '版本号后缀 (会出现在 uname -r)'
+        required: false
+        default: 'RMX5080'
+      create_release:
+        description: '创建 GitHub Release'
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      # ---------------------------------------------------------------- 环境
+      - name: 释放磁盘空间
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装编译依赖
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev \
+            python3 python-is-python3 \
+            zip unzip lz4 zstd cpio rsync ccache kmod dwarves \
+            device-tree-compiler git curl ca-certificates
+
+      - name: 配置 ccache
+        run: |
+          set -euxo pipefail
+          ccache --version
+          ccache --max-size=3G
+          ccache --set-config=compression=true
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+
+      - name: 恢复 ccache 缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ inputs.gki_branch }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ inputs.gki_branch }}-
+
+      - name: 安装 repo 工具
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      # ------------------------------------------------------------ 源码同步
+      - name: 同步 AOSP GKI 源码
+        run: |
+          set -euxo pipefail
+          mkdir -p kernel
+          cd kernel
+          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest \
+            -b "${{ inputs.gki_branch }}" --repo-rev=v2.16
+          repo sync -c -j"$(nproc)" --no-tags --fail-fast
+          test -d common || { echo "::error::repo sync 后没有 common/ 目录"; exit 1; }
+
+      - name: 校验内核版本与 KMI
+        run: |
+          set -euxo pipefail
+          cd kernel
+          MAJ=$(sed -n 's/^VERSION = //p' common/Makefile)
+          PAT=$(sed -n 's/^PATCHLEVEL = //p' common/Makefile)
+          SUB=$(sed -n 's/^SUBLEVEL = //p' common/Makefile)
+          KMI=$(sed -n 's/^KMI_GENERATION=//p' common/build.config.common)
+          LV=$(sed -n 's/^CONFIG_LOCALVERSION="\(.*\)"/\1/p' common/arch/arm64/configs/gki_defconfig)
+          echo "内核版本 = $MAJ.$PAT.$SUB"
+          echo "KMI 代号 = android15-6.6 (KMI_GENERATION=$KMI)"
+          echo "LOCALVERSION = $LV"
+          echo "CLANG = $(sed -n 's/^CLANG_VERSION=//p' common/build.config.constants)"
+          [ "$MAJ.$PAT.$SUB" = "6.6.118" ] || { echo "::error::期望 6.6.118, 实际 $MAJ.$PAT.$SUB"; exit 1; }
+          [ "$KMI" = "8" ] || { echo "::error::期望 KMI_GENERATION=8, 实际 $KMI"; exit 1; }
+          [ "$LV" = "-4k" ] || { echo "::error::期望 LOCALVERSION=-4k, 实际 $LV"; exit 1; }
+          echo "✅ 内核版本 / KMI / 页大小 与 RMX5080 出厂内核一致"
+
+      # ---------------------------------------------------------- 集成 SukiSU
+      - name: 集成 SukiSU-Ultra (builtin 分支, 原生含 SUSFS 胶水)
+        run: |
+          set -euxo pipefail
+          cd kernel
+          git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
+          cd KernelSU
+          git checkout "${{ inputs.ksu_ref }}"
+          echo "SukiSU commit: $(git rev-parse HEAD)"
+          echo "SukiSU version: $(git describe --tags --always)"
+          grep -q 'config KSU_SUSFS' kernel/Kconfig \
+            || { echo "::error::该 SukiSU 分支不含 SUSFS 支持, 请使用 builtin 分支"; exit 1; }
+          cd ..
+          ln -sf "$(realpath --relative-to=common/drivers KernelSU/kernel)" common/drivers/kernelsu
+          grep -q kernelsu common/drivers/Makefile \
+            || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> common/drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' common/drivers/Kconfig \
+            || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig
+          echo "✅ SukiSU-Ultra 已接入 common/drivers/kernelsu"
+
+      # ------------------------------------------------------------- 集成 SUSFS
+      - name: 应用 SUSFS 核心补丁
+        run: |
+          set -euxo pipefail
+          git clone -b "${{ inputs.susfs_branch }}" https://github.com/ShirkNeko/susfs4ksu.git susfs4ksu
+          if [ -n "${{ inputs.susfs_commit }}" ]; then
+            cd susfs4ksu && git checkout "${{ inputs.susfs_commit }}" && cd ..
+          fi
+          echo "SUSFS commit: $(git -C susfs4ksu rev-parse HEAD)"
+          echo "SUSFS version: $(grep -m1 SUSFS_VERSION susfs4ksu/kernel_patches/include/linux/susfs.h)"
+
+          PATCH=susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
+          test -f "$PATCH" || { echo "::error::找不到 SUSFS 补丁 $PATCH"; exit 1; }
+
+          # 1) 投放 SUSFS 核心实现文件
+          cp susfs4ksu/kernel_patches/fs/susfs.c            kernel/common/fs/
+          cp susfs4ksu/kernel_patches/include/linux/susfs.h kernel/common/include/linux/
+          cp susfs4ksu/kernel_patches/include/linux/susfs_def.h kernel/common/include/linux/
+          cp "$PATCH" kernel/common/
+
+          # 2) 打补丁到核心内核
+          cd kernel/common
+          patch -p1 --fuzz=3 --no-backup-if-mismatch < "$(basename "$PATCH")"
+          test -f fs/susfs.c || { echo "::error::fs/susfs.c 缺失"; exit 1; }
+          grep -q 'CONFIG_KSU_SUSFS' include/linux/susfs.h \
+            || echo "::warning::susfs.h 里没有 CONFIG_KSU_SUSFS, 请留意"
+          echo "✅ SUSFS 核心补丁已应用"
+
+      # --------------------------------------------------------------- 配置
+      - name: 写入内核配置 (KSU + SUSFS)
+        run: |
+          set -euxo pipefail
+          cat >> kernel/common/arch/arm64/configs/gki_defconfig <<'EOF'
+
+          # ==== KernelSU (built-in) ====
+          CONFIG_KSU=y
+          CONFIG_KPM=y
+          CONFIG_KSU_SUSFS_SUS_SU=n
+
+          # ==== tmpfs ====
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_TMPFS_POSIX_ACL=y
+
+          # ==== SUSFS v2.3.0 ====
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SUS_PATH=n
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+
+          # ==== 网络 / 拥塞控制 ====
+          CONFIG_IP_NF_TARGET_TTL=y
+          CONFIG_IP6_NF_TARGET_HL=y
+          CONFIG_IP6_NF_MATCH_HL=y
+          EOF
+          echo "✅ 已追加 KSU/SUSFS 配置"
+
+      - name: 调整 AOSP 构建配置
+        run: |
+          set -euxo pipefail
+          cd kernel
+          # check_defconfig 会因为上面的追加配置报错, 去掉
+          sed -i 's/check_defconfig//' common/build.config.gki
+          # 不构建 GKI 的 system_dlkm (vendor 模块保持原厂)
+          sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64
+          sed -i '/MODULES_ORDER=/d; /KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64
+          echo "--- build.config.gki ---"; cat common/build.config.gki
+          echo "--- build.config.gki.aarch64 ---"; cat common/build.config.gki.aarch64
+
+      # --------------------------------------------------------------- 编译
+      - name: 编译内核
+        run: |
+          set -euxo pipefail
+          cd kernel
+          export LTO="${{ inputs.lto }}"
+          export BUILD_CONFIG=common/build.config.gki.aarch64
+          export CC="/usr/bin/ccache clang"
+          echo "LTO=$LTO  BUILD_CONFIG=$BUILD_CONFIG"
+          build/build.sh
+          ccache --show-stats || true
+
+      - name: 收集编译产物
+        run: |
+          set -euxo pipefail
+          echo "=== out 目录结构 ==="
+          find kernel/out -maxdepth 3 -type d | head -20
+          echo "=== 候选内核镜像 ==="
+          find kernel/out -type f \( -name 'Image' -o -name 'Image.gz' -o -name 'Image.lz4' \) -exec ls -l {} \;
+
+          IMG=$(find kernel/out -type f -name 'Image.lz4' | head -1)
+          [ -n "$IMG" ] || IMG=$(find kernel/out -type f -name 'Image.gz' | head -1)
+          [ -n "$IMG" ] || IMG=$(find kernel/out -type f -name 'Image' | head -1)
+          [ -n "$IMG" ] || { echo "::error::没找到编译出的内核镜像"; exit 1; }
+          cp "$IMG" kernel/Image.lz4
+          echo "IMG=$IMG"
+          ls -l kernel/Image.lz4
+          echo "=== 产物内嵌版本串 ==="
+          strings kernel/Image.lz4 2>/dev/null | grep -m1 -E '^6\.6\.[0-9]+' || true
+          echo "IMAGE_PATH=$IMG" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------ AnyKernel3
+      - name: 打包 AnyKernel3
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 -b gki-2.0 https://github.com/WildPlusKernel/AnyKernel3.git AnyKernel3
+          rm -rf AnyKernel3/.git
+          # 使用我们自己的 anykernel.sh
+          cp ak3/anykernel.sh AnyKernel3/anykernel.sh
+          chmod +x AnyKernel3/anykernel.sh
+          cp kernel/Image.lz4 AnyKernel3/
+
+          ZIP="RMX5080-GKI-6.6.118-SukiSU-SUSFS-AnyKernel3.zip"
+          ( cd AnyKernel3 && zip -r9 "../$ZIP" . -x '*.git*' )
+          ls -l "$ZIP"
+          sha256sum "$ZIP" | tee SHA256SUMS.txt
+          echo "ZIP_NAME=$ZIP" >> "$GITHUB_ENV"
+
+      - name: 上传产物 (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: RMX5080-6.6.118-SukiSU-SUSFS
+          path: |
+            ${{ env.ZIP_NAME }}
+            SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: 创建 Release
+        if: ${{ inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}-6.6.118
+          name: "RMX5080 GKI 6.6.118 + SukiSU-Ultra + SUSFS (build ${{ github.run_number }})"
+          body: |
+            目标设备: realme Neo7 SE (RMX5080 / MT6899)
+            内核: Linux **6.6.118**-android15-6.6 (KMI_GENERATION=8, 4K 页)
+            Root: SukiSU-Ultra `${{ inputs.ksu_ref }}` (built-in, 不依赖 LKM)
+            SUSFS: `${{ inputs.susfs_branch }}` @ 核心补丁 v2.3.0
+            LTO: `${{ inputs.lto }}`
+
+            刷入方式: 用 Kernel Flasher / HorizonKernelFlasher 选择本 zip 刷入 (会写入 boot 分区)。
+          files: |
+            ${{ env.ZIP_NAME }}
+            SHA256SUMS.txt
