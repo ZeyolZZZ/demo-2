@@ -25,9 +25,9 @@ on:
         required: true
         default: 'gki-android15-6.6'
       susfs_commit:
-        description: 'susfs4ksu commit (留空 = 分支最新)'
+        description: 'susfs4ksu commit (留空 = 分支最新)。ec03d0c7 = v2.4.0，含新版 KSU 需要的 susfs_set_priority_uid_filter'
         required: false
-        default: 'a0f9c59'
+        default: 'ec03d0c7'
       ksu_version:
         description: '覆盖内核上报的 KSU 版本号。留空=按源码 git commit 数自然计算（推荐：与同代 ksud 协议才对得上，伪装版本号反而会让 KPM supercall 失配）'
         required: false
