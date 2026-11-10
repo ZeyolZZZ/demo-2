@@ -339,7 +339,9 @@ jobs:
             export KBUILD_BUILD_HOST=build-host
             export KBUILD_BUILD_VERSION=1
             export KBUILD_BUILD_TIMESTAMP="Sun Mar 29 12:31:26 UTC 2026"
-            make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 Image.lz4
+            # 同时产出未压缩 Image：SukiSU 的「KPM 补丁模式」用 kptools 处理内核镜像，
+            # 它只认未压缩的 Image，喂 Image.lz4 会报 "kernel image magic error"。
+            make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 Image Image.lz4
           )
           rc=$?
           set -e
@@ -389,6 +391,9 @@ jobs:
           file "$IMG" || true
           cp "$IMG" "$GITHUB_WORKSPACE/Image.lz4"
           ls -l "$GITHUB_WORKSPACE/Image.lz4"
+          # 未压缩 Image 也带上（KPM 补丁模式需要）
+          RAWIMG=$(find common/out bazel-bin -maxdepth 8 -type f -name 'Image' 2>/dev/null | head -1)
+          if [ -n "$RAWIMG" ]; then cp "$RAWIMG" "$GITHUB_WORKSPACE/Image"; ls -l "$GITHUB_WORKSPACE/Image"; else echo "::warning::未找到未压缩 Image"; fi
           echo "=== 产物内嵌版本串 ==="
           strings "$GITHUB_WORKSPACE/Image.lz4" 2>/dev/null | grep -m3 -E '^6\.6\.[0-9]+' || true
 
@@ -401,6 +406,7 @@ jobs:
           cp ak3/anykernel.sh AnyKernel3/anykernel.sh
           chmod +x AnyKernel3/anykernel.sh
           cp Image.lz4 AnyKernel3/
+          [ -f Image ] && cp Image AnyKernel3/ && echo "已附带未压缩 Image（KPM 补丁模式用）"
 
           ZIP="RMX5080-GKI-6.6.118-SukiSU-SUSFS-AnyKernel3.zip"
           ( cd AnyKernel3 && zip -r9 "$GITHUB_WORKSPACE/$ZIP" . -x '*.git*' )
