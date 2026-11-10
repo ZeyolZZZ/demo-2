@@ -17,9 +17,9 @@ on:
         required: true
         default: 'common-android15-6.6-2026-01'
       ksu_ref:
-        description: 'SukiSU-Ultra builtin 分支的 tag/commit/branch (对应管理器 v4.2.0)'
+        description: 'SukiSU-Ultra builtin 分支的 tag/commit/branch (de9bc7e6b461 = 最新, 对应管理器 v4.3.0)'
         required: true
-        default: '70fa0e092a'
+        default: 'de9bc7e6b461'
       susfs_branch:
         description: 'susfs4ksu 分支'
         required: true
@@ -29,9 +29,9 @@ on:
         required: false
         default: 'a0f9c59'
       ksu_version:
-        description: '覆盖内核上报的 KSU 版本号 (留空=按源码 git commit 数计算)。设成与设备上的 SukiSU 管理器 versionCode 相同即可消除"版本不匹配"'
+        description: '覆盖内核上报的 KSU 版本号。留空=按源码 git commit 数自然计算（推荐：与同代 ksud 协议才对得上，伪装版本号反而会让 KPM supercall 失配）'
         required: false
-        default: '40900'
+        default: ''
       lto:
         description: 'LTO 模式 (thin / none)'
         required: true
